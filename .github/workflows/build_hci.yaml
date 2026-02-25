@@ -5,32 +5,42 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.11
 
-      - name: Initialize Zephyr (v3.7.0)
-        # 手动初始化我们需要的稳定版 v3.7.0，而不是由 Action 默认去拉最新版
+      - name: Install West and OS Dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake ccache dtc wget tar
           pip install west
+
+      - name: Checkout Zephyr Source (v3.7.0)
+        run: |
+          # 裸机拉取源码，绝不依赖会报错的 action-zephyr-setup
           west init -m https://github.com/zephyrproject-rtos/zephyr --mr v3.7.0 zephyr-workspace
           cd zephyr-workspace
           west update
+          west zephyr-export
+          pip install -r zephyr/scripts/requirements.txt
 
-      - name: Setup Zephyr Environment
-        # 使用官方 Action 自动安装匹配的 SDK 和工具链
-        # 参考：https://github.com/zephyrproject-rtos/action-zephyr-setup
-        uses: zephyrproject-rtos/action-zephyr-setup@v1
-        with:
-          app-path: zephyr-workspace
-          toolchains: arm-zephyr-eabi
-
-      - name: Configure USB CDC Overlay
-        working-directory: zephyr-workspace
+      - name: Install Zephyr SDK (v0.16.8)
         run: |
+          # 直接手动下载并安装 SDK，彻底绕过路径丢失的玄学问题
+          cd ~
+          wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.16.8/zephyr-sdk-0.16.8_linux-x86_64.tar.xz
+          tar -xf zephyr-sdk-0.16.8_linux-x86_64.tar.xz
+          cd zephyr-sdk-0.16.8
+          # -t 指定交叉编译链，-h 安装主机工具，-c 注册 CMake
+          ./setup.sh -t arm-zephyr-eabi -h -c
+
+      - name: Configure and Build Firmware
+        run: |
+          cd zephyr-workspace
           mkdir -p custom_config
           
-          # 1. 生成核心配置文件 (Overlay Config)
-          # 开启 USB 栈、CDC ACM、并将蓝牙 HCI 绑定到虚拟串口
+          # 1. 核心配置文件
           cat <<EOF > custom_config/overlay.conf
           CONFIG_USB_DEVICE_STACK=y
           CONFIG_USB_DEVICE_PRODUCT="nRF52840 HCI UART"
@@ -40,7 +50,7 @@ jobs:
           CONFIG_BT_UART=y
           CONFIG_UART_INTERRUPT_DRIVEN=y
           CONFIG_UART_LINE_CTRL=y
-          # 彻底禁用日志，确保 HCI 数据流纯净
+          # 彻底禁用日志，确保 HCI 纯净
           CONFIG_LOG=n
           CONFIG_CONSOLE=n
           CONFIG_UART_CONSOLE=n
@@ -48,8 +58,7 @@ jobs:
           CONFIG_BOOT_BANNER=n
           EOF
 
-          # 2. 生成设备树覆盖文件 (Device Tree Overlay)
-          # 将 Zephyr 的 bt-uart 别名强制指向 CDC ACM 虚拟串口
+          # 2. 设备树重定向文件
           cat <<EOF > custom_config/app.overlay
           / {
               chosen {
@@ -63,19 +72,10 @@ jobs:
           };
           EOF
 
-      - name: Build Firmware
-        working-directory: zephyr-workspace
-        run: |
-          # 编译 hci_uart 示例，并挂载我们的自定义配置
+          # 3. 编译
           west build -b nrf52840dongle/nrf52840 zephyr/samples/bluetooth/hci_uart -- \
             -DOVERLAY_CONFIG=$(pwd)/custom_config/overlay.conf \
             -DDTC_OVERLAY_FILE=$(pwd)/custom_config/app.overlay
-
-      - name: Package Firmware
-        working-directory: zephyr-workspace
-        run: |
-          # 这一步是为了生成 nRF Util 需要的 hex，Artifacts 会上传 build 目录
-          ls -l build/zephyr/zephyr.hex
 
       - name: Upload Hex Artifact
         uses: actions/upload-artifact@v4
