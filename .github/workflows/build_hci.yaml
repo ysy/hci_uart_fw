@@ -10,47 +10,57 @@ jobs:
         with:
           python-version: 3.11
 
-      - name: Install West and OS Dependencies
+      - name: Install OS Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build cmake ccache dtc wget tar
+          # 添加了所有底层编译刚需，修正了 device-tree-compiler
+          sudo apt-get install -y ninja-build cmake ccache device-tree-compiler wget tar xz-utils gperf python3-dev
           pip install west
 
-      - name: Checkout Zephyr Source (v3.7.0)
+      - name: Checkout Zephyr Source
         run: |
-          # 裸机拉取源码，绝不依赖会报错的 action-zephyr-setup
+          # 裸机拉取，绝不依赖第三方可能报错的 action
           west init -m https://github.com/zephyrproject-rtos/zephyr --mr v3.7.0 zephyr-workspace
           cd zephyr-workspace
           west update
           west zephyr-export
           pip install -r zephyr/scripts/requirements.txt
 
-      - name: Install Zephyr SDK (v0.16.8)
+      - name: Install Zephyr SDK
         run: |
-          # 直接手动下载并安装 SDK，彻底绕过路径丢失的玄学问题
+          # 直接下载官方原生 SDK 工具链到用户主目录
           cd ~
           wget -q https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.16.8/zephyr-sdk-0.16.8_linux-x86_64.tar.xz
           tar -xf zephyr-sdk-0.16.8_linux-x86_64.tar.xz
           cd zephyr-sdk-0.16.8
-          # -t 指定交叉编译链，-h 安装主机工具，-c 注册 CMake
           ./setup.sh -t arm-zephyr-eabi -h -c
 
       - name: Configure and Build Firmware
         run: |
+          # 🚨 终极保险：强行注入环境变量，CMake 绝对不可能再报 "SDK not found"
+          export ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.16.8
+          export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
+          
           cd zephyr-workspace
           mkdir -p custom_config
           
           # 1. 核心配置文件
           cat <<EOF > custom_config/overlay.conf
+          # --- USB 基础栈 ---
           CONFIG_USB_DEVICE_STACK=y
+          # 🚨 关键修复：强制系统上电即初始化 USB 硬件，否则插电脑无反应
+          CONFIG_USB_DEVICE_INITIALIZE_AT_BOOT=y
           CONFIG_USB_DEVICE_PRODUCT="nRF52840 HCI UART"
           CONFIG_USB_DEVICE_VID=0x1915
           CONFIG_USB_DEVICE_PID=0x520F
-          CONFIG_USB_CDC_ACM=y
-          CONFIG_BT_UART=y
+          
+          # --- 串口与 HCI 配置 ---
+          CONFIG_SERIAL=y
           CONFIG_UART_INTERRUPT_DRIVEN=y
           CONFIG_UART_LINE_CTRL=y
-          # 彻底禁用日志，确保 HCI 纯净
+          CONFIG_USB_CDC_ACM=y
+          
+          # --- 彻底断绝杂波，保障 Bumble 解析 ---
           CONFIG_LOG=n
           CONFIG_CONSOLE=n
           CONFIG_UART_CONSOLE=n
@@ -58,7 +68,7 @@ jobs:
           CONFIG_BOOT_BANNER=n
           EOF
 
-          # 2. 设备树重定向文件
+          # 2. DTS 硬件映射重定向
           cat <<EOF > custom_config/app.overlay
           / {
               chosen {
@@ -73,9 +83,9 @@ jobs:
           EOF
 
           # 3. 编译
-          west build -b nrf52840dongle/nrf52840 zephyr/samples/bluetooth/hci_uart -- \
-            -DOVERLAY_CONFIG=$(pwd)/custom_config/overlay.conf \
-            -DDTC_OVERLAY_FILE=$(pwd)/custom_config/app.overlay
+          west build -b nrf52840dongle zephyr/samples/bluetooth/hci_uart -- \
+            -DOVERLAY_CONFIG="$(pwd)/custom_config/overlay.conf" \
+            -DDTC_OVERLAY_FILE="$(pwd)/custom_config/app.overlay"
 
       - name: Upload Hex Artifact
         uses: actions/upload-artifact@v4
