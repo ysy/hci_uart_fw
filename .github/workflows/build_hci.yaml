@@ -1,0 +1,44 @@
+name: Build Zephyr HCI USB CDC
+on: workflow_dispatch
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: zephyrprojectrtos/ci:latest
+    steps:
+      - name: Checkout Zephyr
+        run: |
+          west init -m https://github.com/zephyrproject-rtos/zephyr --mr main zephyr-workspace
+          cd zephyr-workspace
+          west update
+      - name: Build Firmware
+        run: |
+          cd zephyr-workspace
+          mkdir -p custom_overlay
+          # 开启 USB 虚拟串口并开启中断
+          cat <<EOF > custom_overlay/overlay.conf
+          CONFIG_USB_DEVICE_STACK=y
+          CONFIG_USB_CDC_ACM=y
+          CONFIG_USB_DEVICE_PRODUCT="HCI UART over CDC"
+          CONFIG_UART_INTERRUPT_DRIVEN=y
+          CONFIG_BT_UART=y
+          EOF
+          # 将蓝牙 HCI 的物理串口重定向到 USB 虚拟串口
+          cat <<EOF > custom_overlay/app.overlay
+          / {
+              chosen {
+                  zephyr,bt-uart = &cdc_acm_uart0;
+              };
+          };
+          &zephyr_udc0 {
+              cdc_acm_uart0: cdc_acm_uart0 {
+                  compatible = "zephyr,cdc-acm-uart";
+              };
+          };
+          EOF
+          west build -b nrf52840dongle/nrf52840 zephyr/samples/bluetooth/hci_uart -- -DOVERLAY_CONFIG=custom_overlay/overlay.conf -DDTC_OVERLAY_FILE=custom_overlay/app.overlay
+      - name: Upload Hex
+        uses: actions/upload-artifact@v4
+        with:
+          name: zephyr-hci-cdc
+          path: zephyr-workspace/build/zephyr/zephyr.hex
