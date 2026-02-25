@@ -4,26 +4,39 @@ on: workflow_dispatch
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: zephyrprojectrtos/ci:latest
+    # 使用固定版本的 CI 镜像，内含 SDK 0.16.8，完美匹配 Zephyr v3.7.0
+    container: zephyrprojectrtos/ci:v0.26.11
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 8
     steps:
-      - name: Checkout Zephyr
+      - name: Checkout Zephyr (Stable v3.7.0)
         run: |
-          west init -m https://github.com/zephyrproject-rtos/zephyr --mr main zephyr-workspace
+          # 关键修改：--mr v3.7.0 锁定稳定版本，不再使用 main
+          west init -m https://github.com/zephyrproject-rtos/zephyr --mr v3.7.0 zephyr-workspace
           cd zephyr-workspace
           west update
+          west zephyr-export
+
       - name: Build Firmware
         run: |
           cd zephyr-workspace
+          
+          # 创建 overlay 配置文件
           mkdir -p custom_overlay
-          # 开启 USB 虚拟串口并开启中断
           cat <<EOF > custom_overlay/overlay.conf
           CONFIG_USB_DEVICE_STACK=y
-          CONFIG_USB_CDC_ACM=y
           CONFIG_USB_DEVICE_PRODUCT="HCI UART over CDC"
+          CONFIG_USB_CDC_ACM=y
+          
+          # 关键：将 HCI 接口绑定到 CDC ACM 虚拟串口
           CONFIG_UART_INTERRUPT_DRIVEN=y
           CONFIG_BT_UART=y
+          
+          # 禁用流控，防止因上位机未拉高 RTS/DTR 导致死锁
+          CONFIG_UART_0_ENHANCED_POLL_OUT=y
           EOF
-          # 将蓝牙 HCI 的物理串口重定向到 USB 虚拟串口
+
+          # 创建设备树覆盖文件 (Overlay)
           cat <<EOF > custom_overlay/app.overlay
           / {
               chosen {
@@ -36,9 +49,14 @@ jobs:
               };
           };
           EOF
-          west build -b nrf52840dongle/nrf52840 zephyr/samples/bluetooth/hci_uart -- -DOVERLAY_CONFIG=custom_overlay/overlay.conf -DDTC_OVERLAY_FILE=custom_overlay/app.overlay
+
+          # 执行编译
+          # 注意：v3.7.0 之后的编译目标路径可能微调，这里使用标准路径
+          west build -b nrf52840dongle/nrf52840 zephyr/samples/bluetooth/hci_uart -- -DOVERLAY_CONFIG=$(pwd)/custom_overlay/overlay.conf -DDTC_OVERLAY_FILE=$(pwd)/custom_overlay/app.overlay
+
       - name: Upload Hex
         uses: actions/upload-artifact@v4
         with:
           name: zephyr-hci-cdc
+          # 这里的路径是 Zephyr 编译生成的默认位置
           path: zephyr-workspace/build/zephyr/zephyr.hex
